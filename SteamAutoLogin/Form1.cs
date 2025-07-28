@@ -1,11 +1,12 @@
+using FlaUI.Core;
+using FlaUI.UIA3;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using FlaUI.Core;
-using FlaUI.UIA3;
 
 namespace SteamAutoLogin
 {
@@ -49,11 +50,10 @@ namespace SteamAutoLogin
                 return;
             }
 
-            // 启动Steam并传递CS2启动参数
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                FileName = @"H:\Steam\Steam.exe",  // 换成你本机的 Steam 路径
-                Arguments = "-applaunch 730 -sw -w 1280 -h 720 -novid",
+                FileName = @"H:\Steam\Steam.exe",
+                Arguments = "-applaunch 730 -novid -sw -w 1280 -h 720",
                 UseShellExecute = true
             });
 
@@ -173,10 +173,43 @@ namespace SteamAutoLogin
                     MessageBox.Show("未能检测到验证码界面或未自动填入验证码，请手动操作！");
                 }
             }
+            // 循环检测CS2窗口，最多等120秒，每秒一次
+            System.Diagnostics.Debug.WriteLine("开始循环检测CS2窗口...");
+            IntPtr hwnd = IntPtr.Zero;
+            for (int i = 0; i < 120; i++)
+            {
+                var proc = Process.GetProcessesByName("cs2").FirstOrDefault();
+                hwnd = proc?.MainWindowHandle ?? IntPtr.Zero;
+                System.Diagnostics.Debug.WriteLine($"[{i + 1}s] 通过进程名获取句柄: {hwnd}");
+                if (hwnd != IntPtr.Zero)
+                    break;
+
+                hwnd = FindWindow(null, "Counter-Strike 2");
+                System.Diagnostics.Debug.WriteLine($"[{i + 1}s] 通过窗口名查找句柄: {hwnd}");
+                if (hwnd != IntPtr.Zero)
+                    break;
+
+                await Task.Delay(1000);
+            }
+
+            if (hwnd != IntPtr.Zero)
+            {
+                System.Diagnostics.Debug.WriteLine("找到CS2窗口句柄，开始执行OCR自动点击。");
+                string[] keywords = { "确定", "开始", "死亡竞赛", "不再显示", "关闭" };
+                EasyOcrHelper.WaitAndClickButton(hwnd, new[] { "确定"}, 30, 1000);
+
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine("未找到CS2窗口！");
+                MessageBox.Show("未找到CS2窗口！");
+            }
+
         }
 
-        // Win32窗口相关API
-        [DllImport("user32.dll", SetLastError = true)]
+
+        // Win32 FindWindow声明（如果需要）
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
         static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
         [DllImport("user32.dll")]
