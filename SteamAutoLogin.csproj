@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ExcelDataReader" Version="3.7.0" />
+    <PackageReference Include="FlaUI.Core" Version="5.0.0" />
+    <PackageReference Include="FlaUI.UIA3" Version="5.0.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <!-- SteamKit2 provides access to the Steam network and game coordinator. -->
+    <PackageReference Include="SteamKit2" Version="3.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="SteamApiService.cs" />
+    <Compile Include="SteamGuardHelper.cs" />
+    <Compile Include="ExcelService.cs" />
+    <Compile Include="EasyOcrHelper.cs" />
+    <Compile Include="Form1.cs" />
+    <Compile Include="Form1.Designer.cs" />
+    <Compile Include="Program.cs" />
+    <!-- Include our CS:GO Game Coordinator helper classes -->
+    <Compile Include="CallbackStore.cs" />
+    <Compile Include="CsgoClient.cs" />
+    <Compile Include="Player.cs" />
+    <Compile Include="Cs2GcService.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="easyocr_server.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="data\accounts.xlsx">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

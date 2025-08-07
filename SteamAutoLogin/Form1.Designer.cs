@@ -5,7 +5,8 @@
         private System.ComponentModel.IContainer components = null;
         private System.Windows.Forms.Button btnReadExcel;
         private System.Windows.Forms.ListBox lstAccounts;
-        private System.Windows.Forms.Button btnAutoLogin;
+        private System.Windows.Forms.Button btnStartAutoLevel;
+
 
         protected override void Dispose(bool disposing)
         {
@@ -20,7 +21,7 @@
         {
             btnReadExcel = new Button();
             lstAccounts = new ListBox();
-            btnAutoLogin = new Button();
+            btnStartAutoLevel = new Button();
             SuspendLayout();
             // 
             // btnReadExcel
@@ -42,22 +43,21 @@
             lstAccounts.TabIndex = 1;
             lstAccounts.SelectedIndexChanged += lstAccounts_SelectedIndexChanged;
             // 
-            // btnAutoLogin
-            // 
-            btnAutoLogin.Location = new Point(12, 70);
-            btnAutoLogin.Name = "btnAutoLogin";
-            btnAutoLogin.Size = new Size(120, 40);
-            btnAutoLogin.TabIndex = 2;
-            btnAutoLogin.Text = "自动登录";
-            btnAutoLogin.UseVisualStyleBackColor = true;
-            btnAutoLogin.Click += btnAutoLogin_Click;
+            btnStartAutoLevel.Location = new Point(12, 130);
+            btnStartAutoLevel.Name = "btnStartAutoLevel";
+            btnStartAutoLevel.Size = new Size(120, 40);
+            btnStartAutoLevel.TabIndex = 3;
+            btnStartAutoLevel.Text = "自动刷级";
+            btnStartAutoLevel.UseVisualStyleBackColor = true;
+            btnStartAutoLevel.Click += btnStartAutoLevel_Click;
+
             // 
             // Form1
             // 
-            ClientSize = new Size(800, 450);
-            Controls.Add(btnAutoLogin);
+            ClientSize = new Size(800, 450);      
             Controls.Add(btnReadExcel);
             Controls.Add(lstAccounts);
+            Controls.Add(btnStartAutoLevel);
             Name = "Form1";
             Text = "Steam Auto Login";
             Load += Form1_Load;

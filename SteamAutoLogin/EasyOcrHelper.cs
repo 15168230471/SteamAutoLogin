@@ -1,33 +1,19 @@
-﻿using System;
+﻿using Newtonsoft.Json.Linq;
 using System.Diagnostics;
-using System.Drawing;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Windows.Forms;
-using Newtonsoft.Json.Linq;
-using System.Threading;
 
 public static class EasyOcrHelper
 {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(int dwFlags, int dx, int dy, int cButtons, UIntPtr dwExtraInfo);
-
-    private const int MOUSEEVENTF_LEFTDOWN = 0x02;
-    private const int MOUSEEVENTF_LEFTUP = 0x04;
-
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
 
-    // 截图指定窗口并保存，同时返回窗口左上角
     public static string CaptureWindow(IntPtr hWnd, out int winLeft, out int winTop)
     {
+        // 截图并保存，返回文件路径
         Debug.WriteLine($"[EasyOCR] 开始截图窗口句柄: {hWnd}");
         GetWindowRect(hWnd, out RECT rect);
         winLeft = rect.Left;
@@ -46,11 +32,11 @@ public static class EasyOcrHelper
         return filePath;
     }
 
-    // 调用Python EasyOCR识别图片，返回json数组
     public static JArray RunEasyOcr(string imagePath)
     {
-        string pythonExe = @"C:\Users\hp\AppData\Local\Programs\Python\Python311\python.exe"; // 建议使用环境变量或配置
-        string scriptPath = "easyocr_server.py"; // 确保在exe同目录，或者用绝对路径
+        // 调用Python EasyOCR进行OCR识别并返回结果
+        string pythonExe = @"C:\Users\hp\AppData\Local\Programs\Python\Python311\python.exe";
+        string scriptPath = "easyocr_server.py";
 
         Debug.WriteLine($"[EasyOCR] 开始调用Python OCR，图片: {imagePath}");
         ProcessStartInfo psi = new ProcessStartInfo(pythonExe, $"\"{scriptPath}\" \"{imagePath}\"")
@@ -84,9 +70,9 @@ public static class EasyOcrHelper
         }
     }
 
-    // 查找关键字按钮并点击，详细日志
-    public static bool AutoClickButton(IntPtr hWnd, string[] keywords, int offsetX = 0, int offsetY = 0)
+    public static bool DetectKeyword(IntPtr hWnd, string[] keywords)
     {
+        // 截图并识别
         int winLeft, winTop;
         string imgPath = CaptureWindow(hWnd, out winLeft, out winTop);
         var results = RunEasyOcr(imgPath);
@@ -107,47 +93,39 @@ public static class EasyOcrHelper
             Debug.WriteLine($"    识别: {text} @({x},{y}), 置信度: {conf}");
         }
 
+        // 检查是否找到目标字
         foreach (var obj in results)
         {
             string text = obj["text"]?.ToString() ?? "";
-            int x = obj["x"]?.Value<int>() ?? 0;
-            int y = obj["y"]?.Value<int>() ?? 0;
-
             foreach (string kw in keywords)
             {
-                if (text.Contains(kw) && x > 0 && y > 0)
+                if (text.Contains(kw))
                 {
-                    Debug.WriteLine($"[EasyOCR] 命中关键字“{kw}”，点击点: ({x},{y})");
-                    SetForegroundWindow(hWnd);
-                    Thread.Sleep(100);
-                    Cursor.Position = new Point(winLeft + x + offsetX, winTop + y + offsetY);
-                    Thread.Sleep(80);
-                    mouse_event(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                    Debug.WriteLine($"[EasyOCR] 已点击按钮: {text} ({x},{y}) [全局坐标:({winLeft + x},{winTop + y})]");
-                    return true;
+                    Debug.WriteLine($"[EasyOCR] 找到目标字“{kw}”。");
+                    return true; // 找到目标字，返回 true
                 }
             }
         }
-        Debug.WriteLine("[EasyOCR] 未找到任何关键字按钮！");
-        return false;
+
+        Debug.WriteLine("[EasyOCR] 未找到目标字！");
+        return false; // 未找到目标字，返回 false
     }
 
-    // 循环检测并点击关键按钮，支持超时设置
-    public static bool WaitAndClickButton(IntPtr hWnd, string[] keywords, int maxRetry = 30, int intervalMs = 500)
+    public static bool WaitAndDetectKeyword(IntPtr hWnd, string[] keywords, int maxRetry = 30, int intervalMs = 500)
     {
-        Debug.WriteLine("[EasyOCR] 开始循环等待检测关键按钮...");
+        Debug.WriteLine("[EasyOCR] 开始循环等待检测目标字...");
         for (int retry = 0; retry < maxRetry; retry++)
         {
-            Debug.WriteLine($"[EasyOCR] OCR自动点击第{retry + 1}次...");
-            if (AutoClickButton(hWnd, keywords))
+            Debug.WriteLine($"[EasyOCR] OCR自动检测第{retry + 1}次...");
+            if (DetectKeyword(hWnd, keywords))
             {
-                Debug.WriteLine("[EasyOCR] 成功识别并点击按钮，退出等待循环。");
+                Debug.WriteLine("[EasyOCR] 成功识别到目标字，退出等待循环。");
                 return true;
             }
             Thread.Sleep(intervalMs);
         }
-        Debug.WriteLine("[EasyOCR] 等待超时，未检测到关键按钮。");
-        MessageBox.Show("未能在设定时间内识别到指定按钮！");
+        Debug.WriteLine("[EasyOCR] 等待超时，未检测到目标字。");
+        MessageBox.Show("未能在设定时间内识别到目标字！");
         return false;
     }
 }

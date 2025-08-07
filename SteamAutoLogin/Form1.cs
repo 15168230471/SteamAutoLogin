@@ -1,78 +1,303 @@
-using FlaUI.Core;
-using FlaUI.UIA3;
+ï»¿using ClosedXML.Excel;
+using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace SteamAutoLogin
 {
+    public class LevelInfo
+    {
+        public int? currentLevel { get; set; }
+        public int? currentXP { get; set; }
+        public string account { get; set; }
+    }
+
+    public class AppConfig
+    {
+        public string maFilesDir { get; set; }
+        public string accountsExcelPath { get; set; }
+        public string nodeScriptPath { get; set; }
+        public string steamExePath { get; set; }
+        public string cs2AIScriptPath { get; set; }
+    }
+
     public partial class Form1 : Form
     {
         private ExcelService _excelService;
-        private List<AccountInfo> _accounts; // ±£´æ¶ÁÈ¡µÄËùÓĞÕËºÅ
-        private string maFilesDir = @"F:\SDA\maFiles"; // ÄãµÄmaFilesÎÄ¼ş¼ĞÂ·¾¶
+        private List<AccountInfo> _accounts;
+        private AppConfig _config;
+        private Dictionary<string, int> _accountLatestLevelDict = new Dictionary<string, int>();
 
         public Form1()
         {
             InitializeComponent();
+            LoadConfig();
             _excelService = new ExcelService();
             _accounts = new List<AccountInfo>();
         }
 
-        private void btnReadExcel_Click(object sender, EventArgs e)
+        private void LoadConfig()
         {
-            string filePath = @"data\accounts.xlsx";
-            _accounts = _excelService.ReadAccountsFromExcel(filePath);
-
-            lstAccounts.Items.Clear();
-            foreach (var acc in _accounts)
+            try
             {
-                lstAccounts.Items.Add($"ÕËºÅ: {acc.Username}, ÃÜÂë: {acc.Password}, ÊÇ·ñÉı¼¶Íê³É: {acc.IsUpgraded}");
+                string configText = File.ReadAllText("config.json");
+                _config = JsonConvert.DeserializeObject<AppConfig>(configText);
+                if (_config == null ||
+                    string.IsNullOrWhiteSpace(_config.maFilesDir) ||
+                    string.IsNullOrWhiteSpace(_config.accountsExcelPath) ||
+                    string.IsNullOrWhiteSpace(_config.nodeScriptPath) ||
+                    string.IsNullOrWhiteSpace(_config.steamExePath) ||
+                    string.IsNullOrWhiteSpace(_config.cs2AIScriptPath))
+                {
+                    MessageBox.Show("config.json æ–‡ä»¶å†…å®¹ä¸æ­£ç¡®æˆ–ç¼ºå°‘å­—æ®µï¼");
+                    Environment.Exit(1);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("è¯»å–config.jsonå¤±è´¥: " + ex.Message);
+                Environment.Exit(1);
+            }
+        }
+        private async Task QueryAccount(AccountInfo acc)
+        {
+            Invoke((Action)(() => lstAccounts.Items.Add($"å¼€å§‹æŸ¥è¯¢: è´¦å·: {acc.Username}, å¯†ç : {acc.Password}")));
+
+            string maFilePath = SteamGuardHelper.FindMaFileForAccount(_config.maFilesDir, acc.Username);
+            if (maFilePath == null)
+            {
+                Invoke((Action)(() => lstAccounts.Items.Add($"è´¦å·: {acc.Username} æœªæ‰¾åˆ°maFileï¼Œè·³è¿‡ï¼")));
+                Invoke((Action)(() => lstAccounts.Items.Add($"è´¦å·: {acc.Username} æŸ¥è¯¢ç»“æŸ")));
+                return;
+            }
+
+            var psi = new ProcessStartInfo("node", $"{_config.nodeScriptPath} {acc.Username} {acc.Password} \"{maFilePath}\"")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            string allOut = null;
+            try
+            {
+                allOut = await RunNodeScript(psi);
+            }
+            catch (Exception ex)
+            {
+                Invoke((Action)(() => lstAccounts.Items.Add($"Nodeè¿è¡Œå¼‚å¸¸: {ex.Message}, è´¦å·: {acc.Username}")));
+                Invoke((Action)(() => lstAccounts.Items.Add($"è´¦å·: {acc.Username} æŸ¥è¯¢ç»“æŸ")));
+                return;
+            }
+
+            if (allOut == null)
+            {
+                Invoke((Action)(() => lstAccounts.Items.Add($"è´¦å·: {acc.Username} æŸ¥è¯¢è¶…æ—¶ï¼")));
+                Invoke((Action)(() => lstAccounts.Items.Add($"è´¦å·: {acc.Username} æŸ¥è¯¢ç»“æŸ")));
+                return;
+            }
+
+            try
+            {
+                var info = JsonConvert.DeserializeObject<LevelInfo>(allOut);
+                int level = info?.currentLevel ?? 0;
+                int xp = info?.currentXP ?? 0;
+                lock (_accountLatestLevelDict)
+                {
+                    _accountLatestLevelDict[acc.Username] = level;
+                }
+                Invoke((Action)(() => lstAccounts.Items.Add($"è´¦å·: {acc.Username} ç­‰çº§: {level} ç»éªŒ: {xp}")));
+            }
+            catch
+            {
+                lock (_accountLatestLevelDict)
+                {
+                    _accountLatestLevelDict[acc.Username] = 0;
+                }
+                Invoke((Action)(() => lstAccounts.Items.Add($"è´¦å·: {acc.Username} ç­‰çº§: 0 ç»éªŒ: 0")));
             }
         }
 
+
+        private async void btnReadExcel_Click(object sender, EventArgs e)
+        {
+            string filePath = _config.accountsExcelPath;
+            _accounts = _excelService.ReadAccountsFromExcel(filePath);
+            if (_accounts == null || _accounts.Count == 0)
+            {
+                MessageBox.Show("è¯·å…ˆè¯»å–Excelæ–‡ä»¶ï¼");
+                return;
+            }
+
+            lstAccounts.Items.Clear();
+
+            var tasks = new List<Task>();
+            var semaphore = new SemaphoreSlim(2); // æœ€å¤š2ä¸ªå¹¶å‘
+            const int SingleAccountTimeout = 90 * 1000;
+
+            foreach (var acc in _accounts.Where(a => a.IsUpgraded == "å¦"))
+            {
+                await semaphore.WaitAsync();
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        var t = QueryAccount(acc);
+                        if (await Task.WhenAny(t, Task.Delay(SingleAccountTimeout)) == t)
+                            await t;
+                        else
+                            Invoke((Action)(() => lstAccounts.Items.Add($"è´¦å·: {acc.Username} æŸ¥è¯¢è¶…æ—¶(>90s)ï¼Œå·²è·³è¿‡ï¼")));
+                    }
+                    finally { semaphore.Release(); }
+                }));
+            }
+
+            await Task.WhenAll(tasks);
+            UpdateAccountLevelsToExcel(_config.accountsExcelPath);
+            MessageBox.Show("æ‰€æœ‰è´¦å·çš„æŸ¥è¯¢å·²å®Œæˆï¼Œå¹¶å·²å†™å›Excelï¼");
+        }
+
+        // å•è´¦å·è‡ªåŠ¨ç™»å½•ï¼šä¿ç•™åŸFlaUIè‡ªåŠ¨æ“ä½œæµç¨‹
         private async void btnAutoLogin_Click(object sender, EventArgs e)
         {
             if (_accounts == null || _accounts.Count == 0)
             {
-                MessageBox.Show("ÇëÏÈ¶ÁÈ¡ExcelÎÄ¼ş£¡");
+                MessageBox.Show("è¯·å…ˆè¯»å–Excelæ–‡ä»¶ï¼");
                 return;
             }
             var accountToLogin = _accounts.FirstOrDefault(acc =>
-                !string.IsNullOrWhiteSpace(acc.IsUpgraded) && acc.IsUpgraded.Trim() == "·ñ");
+                !string.IsNullOrWhiteSpace(acc.IsUpgraded) && acc.IsUpgraded.Trim() == "å¦");
             if (accountToLogin == null)
             {
-                MessageBox.Show("ËùÓĞÕËºÅ¶¼ÒÑÉı¼¶£¬ÎŞĞèµÇÂ¼¡£");
+                MessageBox.Show("æ‰€æœ‰è´¦å·éƒ½å·²å‡çº§ï¼Œæ— éœ€ç™»å½•ã€‚");
                 return;
             }
+            await DoFlaUIAutoLogin(accountToLogin);
+        }
 
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        // -------------------------- å…¨è‡ªåŠ¨åˆ·çº§ä¸»æµç¨‹ --------------------------
+        private async void btnStartAutoLevel_Click(object sender, EventArgs e)
+        {
+            // é‡æ–°è¯»å–æ‰€æœ‰è´¦å·
+            _accounts = _excelService.ReadAccountsFromExcel(_config.accountsExcelPath);
+
+            foreach (var acc in _accounts.Where(a => a.IsUpgraded == "å¦"))
             {
-                FileName = @"H:\Steam\Steam.exe",
-                Arguments = "-applaunch 730 -novid -sw -w 1280 -h 720",
-                UseShellExecute = true
-            });
+                await MonitorAndLevelUp(acc);
+                // åˆ·æ–°è´¦å·çŠ¶æ€ï¼Œé¿å…excelæœªå†™å…¥çŠ¶æ€
+                _accounts = _excelService.ReadAccountsFromExcel(_config.accountsExcelPath);
+            }
+            MessageBox.Show("æ‰€æœ‰è´¦å·å·²å‡çº§å®Œæˆï¼");
+        }
 
-            // 2. ÂÖÑ¯µÈ´ı¡°µÇÂ¼ Steam¡±´°¿Úµ¯³ö£¨×î¶à120Ãë£©
+        private async Task MonitorAndLevelUp(AccountInfo acc)
+        {
+            while (true)
+            {
+                // ---- 1. å…³é—­æ‰€æœ‰æ—§è¿›ç¨‹ ----
+                Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] å¼€å§‹å¤„ç†è´¦å· {acc.Username}ï¼šå‡†å¤‡å…³é—­æ—§è¿›ç¨‹...")));
+                KillProcessIfExist("cs2");
+                KillProcessIfExist(Path.GetFileNameWithoutExtension(_config.cs2AIScriptPath));
+                KillProcessIfExist("steam");
+                await Task.Delay(3000);
+
+                // ---- 2. å¯åŠ¨ steam å¹¶è‡ªåŠ¨è¿› cs2 ----
+                Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] å¯åŠ¨Steamå¹¶è‡ªåŠ¨è¿›å…¥CS2...")));
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = _config.steamExePath,
+                    Arguments = "-applaunch 730 -novid -sw -w 1280 -h 720",
+                    UseShellExecute = true
+                });
+
+                // ---- 3. è‡ªåŠ¨ç™»å½•ï¼ˆè´¦å·å¯†ç éªŒè¯ç è‡ªåŠ¨å¡«å……ï¼‰----
+                Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] ç­‰å¾…Steamç™»å½•çª—å£å¹¶è‡ªåŠ¨è¾“å…¥è´¦å·å¯†ç ...")));
+                await DoFlaUIAutoLogin(acc);
+                Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] ç™»å½•æµç¨‹å·²ç»“æŸï¼Œç­‰å¾…CS2è¿›ç¨‹å¯åŠ¨...")));
+
+                // ---- 4. ç­‰å¾…CS2è¿›ç¨‹ ----
+                bool cs2Started = await WaitForProcess("cs2", 120);
+                if (!cs2Started)
+                {
+                    Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] CS2å¯åŠ¨å¤±è´¥ï¼Œé‡è¯•æœ¬è´¦å·ã€‚")));
+                    continue;
+                }
+                Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] æ£€æµ‹åˆ°CS2è¿›ç¨‹ï¼Œå‡†å¤‡å¯åŠ¨AIæŒ‚æœºè„šæœ¬...")));
+
+                // ---- 5. å¯åŠ¨AIæŒ‚æœºè„šæœ¬ ----
+                var aiProc = StartAIProcess();
+                Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] AIæŒ‚æœºè„šæœ¬å·²å¯åŠ¨ï¼Œè¿›å…¥æŒ‚æœºç›‘æ§é˜¶æ®µ...")));
+
+                // ---- 6. ç›‘æ§ä¸‰è¿›ç¨‹ ----
+                while (true)
+                {
+                    await Task.Delay(3000);
+                    bool steamAlive = Process.GetProcessesByName("steam").Any();
+                    bool cs2Alive = Process.GetProcessesByName("cs2").Any();
+                    string aiExeNoExt = Path.GetFileNameWithoutExtension(_config.cs2AIScriptPath);
+                    bool aiAlive = Process.GetProcessesByName(aiExeNoExt).Any();
+                    if (!steamAlive && !cs2Alive && !aiAlive)
+                    {
+                        Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] æ£€æµ‹åˆ°steam/cs2/AIè„šæœ¬å‡å·²å…³é—­ï¼Œå‡†å¤‡æŸ¥è¯¢å½“å‰ç­‰çº§...")));
+                        break;
+                    }
+                }
+
+                // ---- 7. æŸ¥è¯¢ç­‰çº§å¹¶å†™å›excel ----
+                int newLevel = await QueryLevelDirectly(acc);
+                lock (_accountLatestLevelDict)
+                {
+                    _accountLatestLevelDict[acc.Username] = newLevel;
+                }
+                UpdateAccountLevelsToExcel(_config.accountsExcelPath);
+                Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] æŸ¥è¯¢å®Œæˆï¼Œè´¦å· {acc.Username} å½“å‰ç­‰çº§ï¼š{newLevel}ã€‚")));
+
+                // ---- 8. åˆ¤æ–­æ˜¯å¦å‡çº§ ----
+                int initialLevel = 0;
+                _accounts = _excelService.ReadAccountsFromExcel(_config.accountsExcelPath);
+                var accNow = _accounts.FirstOrDefault(a => a.Username == acc.Username);
+                if (accNow != null) initialLevel = accNow.InitialLevel;
+
+                if (newLevel == initialLevel + 1)
+                {
+                    Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] è´¦å· {acc.Username} å·²å‡çº§ï¼å‡†å¤‡åˆ‡æ¢ä¸‹ä¸€ä¸ªè´¦å·ã€‚")));
+                    break; // è¿›å…¥ä¸‹ä¸€ä¸ªè´¦å·
+                }
+                else
+                {
+                    Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] è´¦å· {acc.Username} æœªå‡çº§ï¼Œé‡æ–°å°è¯•æœ¬è´¦å·ã€‚")));
+                    // ç»§ç»­å¾ªç¯é‡è¯•æœ¬è´¦å·
+                }
+            }
+        }
+
+
+        // è‡ªåŠ¨ç™»å½•è¿‡ç¨‹ï¼ˆåŸFlaUI+å‰ªè´´æ¿+éªŒè¯ç é€»è¾‘ï¼‰
+        private async Task DoFlaUIAutoLogin(AccountInfo acc)
+        {
+           
+            // 2. ç­‰å¾…Steamç™»å½•çª—å£
             IntPtr hwndLogin = IntPtr.Zero;
             for (int i = 0; i < 120; i++)
             {
-                hwndLogin = FindWindow(null, "µÇÂ¼ Steam"); // Ó¢ÎÄÎª "Steam Login"
+                hwndLogin = FindWindow(null, "ç™»å½• Steam"); // "Steam Login" è‹±æ–‡
                 if (hwndLogin != IntPtr.Zero)
                     break;
                 await Task.Delay(1000);
             }
             if (hwndLogin == IntPtr.Zero)
             {
-                MessageBox.Show("Î´ÄÜÔÚ120ÃëÄÚ¼ì²âµ½SteamµÇÂ¼´°¿Ú£¡");
+                MessageBox.Show("æœªèƒ½åœ¨120ç§’å†…æ£€æµ‹åˆ°Steamç™»å½•çª—å£ï¼");
                 return;
             }
 
-            // 3. ×Ô¶¯ÊäÈëÕËºÅ¡¢ÃÜÂë
             while (GetForegroundWindow() != hwndLogin)
             {
                 SetForegroundWindow(hwndLogin);
@@ -81,26 +306,24 @@ namespace SteamAutoLogin
 
             using (var automation = new FlaUI.UIA3.UIA3Automation())
             {
-                var steamLoginWin = automation.GetDesktop().FindFirstDescendant(cf => cf.ByName("µÇÂ¼ Steam"));
+                var steamLoginWin = automation.GetDesktop().FindFirstDescendant(cf => cf.ByName("ç™»å½• Steam"));
                 if (steamLoginWin != null)
                 {
                     var allElems = steamLoginWin.FindAllDescendants();
                     var allEdits = allElems.Where(e => e.ControlType == FlaUI.Core.Definitions.ControlType.Edit).ToList();
                     if (allEdits.Count >= 2)
                     {
-                        // ÕËºÅÊäÈë¿ò
                         allEdits[0].Focus();
                         await Task.Delay(200);
-                        Clipboard.SetText(accountToLogin.Username);
+                        Clipboard.SetText(acc.Username);
                         SendKeys.SendWait("^a");
                         await Task.Delay(80);
                         SendKeys.SendWait("^v");
                         await Task.Delay(200);
 
-                        // ÃÜÂëÊäÈë¿ò
                         allEdits[1].Focus();
                         await Task.Delay(200);
-                        Clipboard.SetText(accountToLogin.Password);
+                        Clipboard.SetText(acc.Password);
                         SendKeys.SendWait("^a");
                         await Task.Delay(80);
                         SendKeys.SendWait("^v");
@@ -111,9 +334,8 @@ namespace SteamAutoLogin
                     }
                     else
                     {
-                        // ¶µµ×£¨Ô­·½·¨£©
                         SetForegroundWindow(hwndLogin);
-                        Clipboard.SetText(accountToLogin.Username);
+                        Clipboard.SetText(acc.Username);
                         SendKeys.SendWait("^a");
                         SendKeys.SendWait("^v");
                         await Task.Delay(150);
@@ -121,7 +343,7 @@ namespace SteamAutoLogin
                         SendKeys.SendWait("{TAB}");
                         await Task.Delay(150);
 
-                        Clipboard.SetText(accountToLogin.Password);
+                        Clipboard.SetText(acc.Password);
                         SendKeys.SendWait("^a");
                         SendKeys.SendWait("^v");
                         await Task.Delay(150);
@@ -131,29 +353,26 @@ namespace SteamAutoLogin
                 }
             }
 
-            // 4. ×Ô¶¯ÊäÈëSteam GuardÑéÖ¤Âë
-            string maFilePath = SteamGuardHelper.FindMaFileForAccount(maFilesDir, accountToLogin.Username);
+            // 4. è‡ªåŠ¨è¾“å…¥Steam GuardéªŒè¯ç 
+            string maFilePath = SteamGuardHelper.FindMaFileForAccount(_config.maFilesDir, acc.Username);
             if (maFilePath == null)
             {
-                MessageBox.Show("Î´ÕÒµ½´ËÕËºÅµÄmaFile£¬ÎŞ·¨×Ô¶¯»ñÈ¡ÑéÖ¤Âë£¡");
+                MessageBox.Show("æœªæ‰¾åˆ°æ­¤è´¦å·çš„maFileï¼Œæ— æ³•è‡ªåŠ¨è·å–éªŒè¯ç ï¼");
                 return;
             }
-
             using (var automation = new FlaUI.UIA3.UIA3Automation())
             {
                 bool codeEntered = false;
                 for (int i = 0; i < 40; i++)
                 {
-                    var win = automation.GetDesktop().FindFirstDescendant(cf => cf.ByName("µÇÂ¼ Steam"));
+                    var win = automation.GetDesktop().FindFirstDescendant(cf => cf.ByName("ç™»å½• Steam"));
                     if (win != null)
                     {
-                        var label = win.FindFirstDescendant(cf => cf.ByName("ÊäÈëÄú Steam ÊÖ»úÓ¦ÓÃÉÏµÄ´úÂë"));
+                        var label = win.FindFirstDescendant(cf => cf.ByName("è¾“å…¥æ‚¨ Steam æ‰‹æœºåº”ç”¨ä¸Šçš„ä»£ç "));
                         if (label != null)
                         {
                             win.Focus();
-
                             string code = SteamGuardHelper.GetSteamGuardCode(maFilePath);
-
                             Clipboard.SetText(code);
                             await Task.Delay(60);
                             SendKeys.SendWait("^a");
@@ -167,64 +386,129 @@ namespace SteamAutoLogin
                     }
                     await Task.Delay(500);
                 }
-
                 if (!codeEntered)
-                {
-                    MessageBox.Show("Î´ÄÜ¼ì²âµ½ÑéÖ¤Âë½çÃæ»òÎ´×Ô¶¯ÌîÈëÑéÖ¤Âë£¬ÇëÊÖ¶¯²Ù×÷£¡");
-                }
+                    MessageBox.Show("æœªèƒ½æ£€æµ‹åˆ°éªŒè¯ç ç•Œé¢æˆ–æœªè‡ªåŠ¨å¡«å…¥éªŒè¯ç ï¼Œè¯·æ‰‹åŠ¨æ“ä½œï¼");
             }
-            // Ñ­»·¼ì²âCS2´°¿Ú£¬×î¶àµÈ120Ãë£¬Ã¿ÃëÒ»´Î
-            System.Diagnostics.Debug.WriteLine("¿ªÊ¼Ñ­»·¼ì²âCS2´°¿Ú...");
-            IntPtr hwnd = IntPtr.Zero;
-            for (int i = 0; i < 120; i++)
-            {
-                var proc = Process.GetProcessesByName("cs2").FirstOrDefault();
-                hwnd = proc?.MainWindowHandle ?? IntPtr.Zero;
-                System.Diagnostics.Debug.WriteLine($"[{i + 1}s] Í¨¹ı½ø³ÌÃû»ñÈ¡¾ä±ú: {hwnd}");
-                if (hwnd != IntPtr.Zero)
-                    break;
-
-                hwnd = FindWindow(null, "Counter-Strike 2");
-                System.Diagnostics.Debug.WriteLine($"[{i + 1}s] Í¨¹ı´°¿ÚÃû²éÕÒ¾ä±ú: {hwnd}");
-                if (hwnd != IntPtr.Zero)
-                    break;
-
-                await Task.Delay(1000);
-            }
-
-            if (hwnd != IntPtr.Zero)
-            {
-                System.Diagnostics.Debug.WriteLine("ÕÒµ½CS2´°¿Ú¾ä±ú£¬¿ªÊ¼Ö´ĞĞOCR×Ô¶¯µã»÷¡£");
-                string[] keywords = { "È·¶¨", "¿ªÊ¼", "ËÀÍö¾ºÈü", "²»ÔÙÏÔÊ¾", "¹Ø±Õ" };
-                EasyOcrHelper.WaitAndClickButton(hwnd, new[] { "È·¶¨"}, 30, 1000);
-
-            }
-            else
-            {
-                System.Diagnostics.Debug.WriteLine("Î´ÕÒµ½CS2´°¿Ú£¡");
-                MessageBox.Show("Î´ÕÒµ½CS2´°¿Ú£¡");
-            }
-
         }
 
+        // è¿›ç¨‹è¾…åŠ©
+        private void KillProcessIfExist(string procName)
+        {
+            foreach (var p in Process.GetProcessesByName(procName))
+            {
+                try { p.Kill(); } catch { }
+            }
+        }
 
-        // Win32 FindWindowÉùÃ÷£¨Èç¹ûĞèÒª£©
+        private async Task<bool> WaitForProcess(string procName, int timeoutSec = 120)
+        {
+            for (int i = 0; i < timeoutSec; i++)
+            {
+                var proc = Process.GetProcessesByName(procName).FirstOrDefault();
+                if (proc != null)
+                    return true;
+                await Task.Delay(1000);
+            }
+            return false;
+        }
+
+        private Process StartAIProcess()
+        {
+            return Process.Start(new ProcessStartInfo
+            {
+                FileName = _config.cs2AIScriptPath,
+                UseShellExecute = true
+            });
+        }
+
+        private async Task<int> QueryLevelDirectly(AccountInfo acc)
+        {
+            string maFilePath = SteamGuardHelper.FindMaFileForAccount(_config.maFilesDir, acc.Username);
+            if (maFilePath == null) return 0;
+            var psi = new ProcessStartInfo("node", $"{_config.nodeScriptPath} {acc.Username} {acc.Password} \"{maFilePath}\"")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            string allOut = null;
+            try { allOut = await RunNodeScript(psi); }
+            catch { return 0; }
+            try
+            {
+                var info = JsonConvert.DeserializeObject<LevelInfo>(allOut);
+                return info?.currentLevel ?? 0;
+            }
+            catch { return 0; }
+        }
+
+        private async Task<string> RunNodeScript(ProcessStartInfo psi)
+        {
+            using (var process = Process.Start(psi))
+            using (var reader = process.StandardOutput)
+            {
+                var readTask = reader.ReadToEndAsync();
+                if (await Task.WhenAny(readTask, Task.Delay(60 * 1000)) == readTask)
+                    return readTask.Result;
+                else
+                {
+                    try { process.Kill(); } catch { }
+                    return null;
+                }
+            }
+        }
+
+        private void UpdateAccountLevelsToExcel(string filePath)
+        {
+            var dict = _accountLatestLevelDict;
+            if (dict.Count == 0) return;
+
+            using (var workbook = new XLWorkbook(filePath))
+            {
+                var ws = workbook.Worksheets.First();
+                var headerRow = ws.Row(1);
+                int lastCol = headerRow.LastCellUsed().Address.ColumnNumber;
+                int colAccount = 0, colIsUpgraded = 0, colInitialLevel = 0, colLatestLevel = 0;
+                for (int col = 1; col <= lastCol; col++)
+                {
+                    var cellVal = headerRow.Cell(col).GetString().Trim();
+                    if (cellVal.Contains("è´¦å·")) colAccount = col;
+                    else if (cellVal.Contains("æ˜¯å¦å·²å‡çº§")) colIsUpgraded = col;
+                    else if (cellVal.Contains("åˆå§‹ç­‰çº§")) colInitialLevel = col;
+                    else if (cellVal.Contains("æœ€æ–°ç­‰çº§")) colLatestLevel = col;
+                }
+                if (colAccount == 0 || colIsUpgraded == 0 || colInitialLevel == 0 || colLatestLevel == 0)
+                {
+                    MessageBox.Show($"è¡¨å¤´è¯†åˆ«å¤±è´¥ã€‚è´¦å·:{colAccount} æ˜¯å¦å·²å‡çº§:{colIsUpgraded} åˆå§‹ç­‰çº§:{colInitialLevel} æœ€æ–°ç­‰çº§:{colLatestLevel}");
+                    return;
+                }
+                int lastRow = ws.LastRowUsed().RowNumber();
+                for (int row = 2; row <= lastRow; row++)
+                {
+                    var username = ws.Cell(row, colAccount).GetString().Trim();
+                    if (string.IsNullOrWhiteSpace(username)) continue;
+                    if (dict.TryGetValue(username, out int newLevel))
+                    {
+                        ws.Cell(row, colLatestLevel).Value = newLevel;
+                        int initialLevel = 0;
+                        try { initialLevel = ws.Cell(row, colInitialLevel).GetValue<int>(); } catch { }
+                        if (newLevel == initialLevel + 1)
+                            ws.Cell(row, colIsUpgraded).Value = "æ˜¯";
+                    }
+                }
+                workbook.Save();
+            }
+        }
+
+        // Win32è¾…åŠ©
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
         static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
-
         [DllImport("user32.dll")]
         static extern bool SetForegroundWindow(IntPtr hWnd);
-
         [DllImport("user32.dll")]
         static extern IntPtr GetForegroundWindow();
 
-        private void lstAccounts_SelectedIndexChanged(object sender, EventArgs e)
-        {
-            // ¿É²»ÊµÏÖ
-        }
-        private void Form1_Load(object sender, EventArgs e)
-        {
-            // ¿É²»ÊµÏÖ
-        }
+        private void lstAccounts_SelectedIndexChanged(object sender, EventArgs e) { }
+        private void Form1_Load(object sender, EventArgs e) { }
     }
 }
