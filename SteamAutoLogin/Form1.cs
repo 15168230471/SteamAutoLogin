@@ -17,15 +17,20 @@ namespace SteamAutoLogin
         public int? currentLevel { get; set; }
         public int? currentXP { get; set; }
         public string account { get; set; }
+
+        // 读取 Node 的错误信息
+        public string error { get; set; }
+        public string detail { get; set; }
     }
 
     public class AppConfig
     {
         public string maFilesDir { get; set; }
         public string accountsExcelPath { get; set; }
-        public string nodeScriptPath { get; set; }
+        public string nodeScriptPath { get; set; }  // 绝对路径到 get_cs2_level.js
         public string steamExePath { get; set; }
         public string cs2AIScriptPath { get; set; }
+        // 如需固定 node.exe 路径可加字段：public string nodeExePath { get; set; }
     }
 
     public partial class Form1 : Form
@@ -33,7 +38,7 @@ namespace SteamAutoLogin
         private ExcelService _excelService;
         private List<AccountInfo> _accounts;
         private AppConfig _config;
-        private Dictionary<string, int> _accountLatestLevelDict = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> _accountLatestLevelDict = new Dictionary<string, int>();
 
         public Form1()
         {
@@ -66,63 +71,148 @@ namespace SteamAutoLogin
                 Environment.Exit(1);
             }
         }
-        private async Task QueryAccount(AccountInfo acc)
+
+        // 统一构建 Node 启动信息：工作目录=脚本目录；参数全部加引号
+        private ProcessStartInfo BuildNodeStartInfo(string username, string password, string maFile)
         {
-            Invoke((Action)(() => lstAccounts.Items.Add($"开始查询: 账号: {acc.Username}, 密码: {acc.Password}")));
+            var nodeExe = "node"; // 若在配置中固定 node.exe 路径，改成 _config.nodeExePath
+            string scriptPath = _config.nodeScriptPath;           // 绝对路径
+            string workDir = Path.GetDirectoryName(scriptPath) ?? AppDomain.CurrentDomain.BaseDirectory;
 
-            string maFilePath = SteamGuardHelper.FindMaFileForAccount(_config.maFilesDir, acc.Username);
-            if (maFilePath == null)
-            {
-                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 未找到maFile，跳过！")));
-                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 查询结束")));
-                return;
-            }
+            // 每个参数加引号，避免空格/特殊字符被 shell 解释
+            string args = $"\"{scriptPath}\" \"{username}\" \"{password}\" \"{maFile}\"";
 
-            var psi = new ProcessStartInfo("node", $"{_config.nodeScriptPath} {acc.Username} {acc.Password} \"{maFilePath}\"")
+            return new ProcessStartInfo(nodeExe, args)
             {
+                WorkingDirectory = workDir,
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+        }
 
-            string allOut = null;
+        private async Task QueryAccount(AccountInfo acc, int retry = 0)
+        {
+            // --- 小随机延迟，避免同一IP瞬时打爆 ---
+            if (retry == 0)
+            {
+                var rnd = new Random();
+                int jitter = rnd.Next(5000, 15000); // 5~15s
+                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} {jitter / 1000}s 后开始查询（防频控）...")));
+                await Task.Delay(jitter);
+            }
+
+            // --- 启动信息 ---
+            Invoke((Action)(() => lstAccounts.Items.Add($"开始查询: 账号: {acc.Username}, 密码: {acc.Password}")));
+            //Invoke((Action)(() => lstAccounts.Items.Add($"使用脚本: {_config.nodeScriptPath}")));
+
+            string maFilePath = SteamGuardHelper.FindMaFileForAccount(_config.maFilesDir, acc.Username);
+            //Invoke((Action)(() => lstAccounts.Items.Add($"maFile: {maFilePath ?? "<未找到>"}")));
+            if (maFilePath == null)
+            {
+                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 未找到 maFile，跳过。")));
+                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 查询结束")));
+                return;
+            }
+
+            var psi = BuildNodeStartInfo(acc.Username, acc.Password, maFilePath);
+
+            // --- 跑 Node ---
+            string stdout = null, stderr = null;
             try
             {
-                allOut = await RunNodeScript(psi);
+                (stdout, stderr) = await RunNodeScript(psi, acc.Username);
             }
             catch (Exception ex)
             {
-                Invoke((Action)(() => lstAccounts.Items.Add($"Node运行异常: {ex.Message}, 账号: {acc.Username}")));
+                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} Node运行异常: {ex.Message}")));
                 Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 查询结束")));
                 return;
             }
 
-            if (allOut == null)
+            if (stdout == null)
             {
-                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 查询超时！")));
+                Invoke((Action)(() => lstAccounts.Items.Add(
+                    $"账号: {acc.Username} 查询超时(>130s)。stderr预览: " +
+                    (string.IsNullOrWhiteSpace(stderr) ? "<空>" : stderr.Split('\n').FirstOrDefault())
+                )));
                 Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 查询结束")));
                 return;
             }
 
+            // --- 解析 JSON ---
+            LevelInfo info = null;
             try
             {
-                var info = JsonConvert.DeserializeObject<LevelInfo>(allOut);
-                int level = info?.currentLevel ?? 0;
-                int xp = info?.currentXP ?? 0;
-                lock (_accountLatestLevelDict)
-                {
-                    _accountLatestLevelDict[acc.Username] = level;
-                }
-                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 等级: {level} 经验: {xp}")));
+                string json = ExtractLastJson(stdout);
+                info = JsonConvert.DeserializeObject<LevelInfo>(json);
             }
-            catch
+            catch (Exception ex)
             {
-                lock (_accountLatestLevelDict)
-                {
-                    _accountLatestLevelDict[acc.Username] = 0;
-                }
-                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 等级: 0 经验: 0")));
+                Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} JSON解析失败: {ex.Message}")));
+                return; // 解析失败不写0
             }
+
+            // --- 辅助判断（本地函数） ---
+            bool IsRateLimited(LevelInfo i) =>
+                i != null &&
+                string.Equals(i.error, "steam_error", StringComparison.OrdinalIgnoreCase) &&
+                (i.detail?.IndexOf("RateLimitExceeded", StringComparison.OrdinalIgnoreCase) >= 0);
+
+            bool IsTransient(LevelInfo i) =>
+                i != null &&
+                (
+                    string.Equals(i.error, "gc_connect_timeout_60s", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(i.error, "timeout_120s", StringComparison.OrdinalIgnoreCase) ||
+                    (string.Equals(i.error, "steam_error", StringComparison.OrdinalIgnoreCase) &&
+                     (i.detail?.IndexOf("Request timed out", StringComparison.OrdinalIgnoreCase) >= 0))
+                );
+
+            // --- 错误处理与重试 ---
+            if (!string.IsNullOrEmpty(info?.error))
+            {
+                // 频控：指数退避 3 次（60s -> 150s -> 300s）
+                if (IsRateLimited(info) && retry < 3)
+                {
+                    int[] backoff = { 60_000, 150_000, 300_000 };
+                    int wait = backoff[retry];
+                    Invoke((Action)(() => lstAccounts.Items.Add(
+                        $"账号: {acc.Username} 触发频控，{wait / 1000}s 后重试({retry + 1}/3)...")));
+                    await Task.Delay(wait);
+                    await QueryAccount(acc, retry + 1);
+                    return;
+                }
+
+                // 瞬态超时：最多再试 1 次（30~60s 随机）
+                if (IsTransient(info) && retry < 1)
+                {
+                    var rnd = new Random();
+                    int wait = rnd.Next(30_000, 60_000);
+                    Invoke((Action)(() => lstAccounts.Items.Add(
+                        $"账号: {acc.Username} 网络/GC 超时，{wait / 1000}s 后重试(1/1)...")));
+                    await Task.Delay(wait);
+                    await QueryAccount(acc, retry + 1);
+                    return;
+                }
+
+                // 其他错误：仅提示，不写 0
+                Invoke((Action)(() => lstAccounts.Items.Add(
+                    $"账号: {acc.Username} 查询失败: {info.error}" +
+                    (string.IsNullOrEmpty(info.detail) ? "" : $" | {info.detail}")
+                )));
+                return;
+            }
+
+            // --- 成功：记录并显示 ---
+            int level = info?.currentLevel ?? 0;
+            int xp = info?.currentXP ?? 0;
+
+            lock (_accountLatestLevelDict)
+            {
+                _accountLatestLevelDict[acc.Username] = level;
+            }
+            Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 等级: {level} 经验: {xp}")));
         }
 
 
@@ -139,8 +229,8 @@ namespace SteamAutoLogin
             lstAccounts.Items.Clear();
 
             var tasks = new List<Task>();
-            var semaphore = new SemaphoreSlim(2); // 最多2个并发
-            const int SingleAccountTimeout = 90 * 1000;
+            var semaphore = new SemaphoreSlim(1); // 最多2个并发
+            const int SingleAccountTimeout = 180 * 1000; // 外层保护 3 分钟
 
             foreach (var acc in _accounts.Where(a => a.IsUpgraded == "否"))
             {
@@ -153,15 +243,17 @@ namespace SteamAutoLogin
                         if (await Task.WhenAny(t, Task.Delay(SingleAccountTimeout)) == t)
                             await t;
                         else
-                            Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 查询超时(>90s)，已跳过！")));
+                            Invoke((Action)(() => lstAccounts.Items.Add($"账号: {acc.Username} 查询超时(>180s)，已跳过！")));
                     }
                     finally { semaphore.Release(); }
                 }));
             }
 
             await Task.WhenAll(tasks);
+
+            // 只把成功的（在字典中的）写回
             UpdateAccountLevelsToExcel(_config.accountsExcelPath);
-            MessageBox.Show("所有账号的查询已完成，并已写回Excel！");
+            MessageBox.Show("所有账号的查询已完成，并已写回Excel（仅成功结果）！");
         }
 
         // 单账号自动登录：保留原FlaUI自动操作流程
@@ -185,13 +277,11 @@ namespace SteamAutoLogin
         // -------------------------- 全自动刷级主流程 --------------------------
         private async void btnStartAutoLevel_Click(object sender, EventArgs e)
         {
-            // 重新读取所有账号
             _accounts = _excelService.ReadAccountsFromExcel(_config.accountsExcelPath);
 
             foreach (var acc in _accounts.Where(a => a.IsUpgraded == "否"))
             {
                 await MonitorAndLevelUp(acc);
-                // 刷新账号状态，避免excel未写入状态
                 _accounts = _excelService.ReadAccountsFromExcel(_config.accountsExcelPath);
             }
             MessageBox.Show("所有账号已升级完成！");
@@ -201,14 +291,12 @@ namespace SteamAutoLogin
         {
             while (true)
             {
-                // ---- 1. 关闭所有旧进程 ----
                 Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 开始处理账号 {acc.Username}：准备关闭旧进程...")));
                 KillProcessIfExist("cs2");
                 KillProcessIfExist(Path.GetFileNameWithoutExtension(_config.cs2AIScriptPath));
                 KillProcessIfExist("steam");
                 await Task.Delay(3000);
 
-                // ---- 2. 启动 steam 并自动进 cs2 ----
                 Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 启动Steam并自动进入CS2...")));
                 Process.Start(new ProcessStartInfo
                 {
@@ -217,12 +305,10 @@ namespace SteamAutoLogin
                     UseShellExecute = true
                 });
 
-                // ---- 3. 自动登录（账号密码验证码自动填充）----
                 Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 等待Steam登录窗口并自动输入账号密码...")));
                 await DoFlaUIAutoLogin(acc);
                 Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 登录流程已结束，等待CS2进程启动...")));
 
-                // ---- 4. 等待CS2进程 ----
                 bool cs2Started = await WaitForProcess("cs2", 120);
                 if (!cs2Started)
                 {
@@ -231,14 +317,13 @@ namespace SteamAutoLogin
                 }
                 Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 检测到CS2进程，准备启动AI挂机脚本...")));
 
-                // ---- 5. 启动AI挂机脚本 ----
+                await Task.Delay(50000);
                 var aiProc = StartAIProcess();
                 Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] AI挂机脚本已启动，进入挂机监控阶段...")));
 
-                // ---- 6. 监控三进程 ----
                 while (true)
                 {
-                    await Task.Delay(3000);
+                    await Task.Delay(60000);
                     bool steamAlive = Process.GetProcessesByName("steam").Any();
                     bool cs2Alive = Process.GetProcessesByName("cs2").Any();
                     string aiExeNoExt = Path.GetFileNameWithoutExtension(_config.cs2AIScriptPath);
@@ -250,8 +335,13 @@ namespace SteamAutoLogin
                     }
                 }
 
-                // ---- 7. 查询等级并写回excel ----
                 int newLevel = await QueryLevelDirectly(acc);
+                if (newLevel < 0)
+                {
+                    Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 查询失败，跳过写回Excel（稍后可重试）。")));
+                    continue; // 失败不更新、不判断升级
+                }
+
                 lock (_accountLatestLevelDict)
                 {
                     _accountLatestLevelDict[acc.Username] = newLevel;
@@ -259,7 +349,6 @@ namespace SteamAutoLogin
                 UpdateAccountLevelsToExcel(_config.accountsExcelPath);
                 Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 查询完成，账号 {acc.Username} 当前等级：{newLevel}。")));
 
-                // ---- 8. 判断是否升级 ----
                 int initialLevel = 0;
                 _accounts = _excelService.ReadAccountsFromExcel(_config.accountsExcelPath);
                 var accNow = _accounts.FirstOrDefault(a => a.Username == acc.Username);
@@ -268,33 +357,30 @@ namespace SteamAutoLogin
                 if (newLevel == initialLevel + 1)
                 {
                     Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 账号 {acc.Username} 已升级！准备切换下一个账号。")));
-                    break; // 进入下一个账号
+                    break;
                 }
                 else
                 {
                     Invoke((Action)(() => lstAccounts.Items.Add($"[{DateTime.Now:HH:mm:ss}] 账号 {acc.Username} 未升级，重新尝试本账号。")));
-                    // 继续循环重试本账号
                 }
             }
         }
 
-
         // 自动登录过程（原FlaUI+剪贴板+验证码逻辑）
         private async Task DoFlaUIAutoLogin(AccountInfo acc)
         {
-           
-            // 2. 等待Steam登录窗口
             IntPtr hwndLogin = IntPtr.Zero;
-            for (int i = 0; i < 120; i++)
+            for (int i = 0; i < 240; i++)
             {
-                hwndLogin = FindWindow(null, "登录 Steam"); // "Steam Login" 英文
+                hwndLogin = FindWindow(null, "登录 Steam"); // "Steam Login"
                 if (hwndLogin != IntPtr.Zero)
                     break;
                 await Task.Delay(1000);
             }
             if (hwndLogin == IntPtr.Zero)
             {
-                MessageBox.Show("未能在120秒内检测到Steam登录窗口！");
+                MessageBox.Show("未能在240秒内检测到Steam登录窗口！即将关闭steam.exe");
+                KillProcessIfExist("steam");
                 return;
             }
 
@@ -304,66 +390,76 @@ namespace SteamAutoLogin
                 await Task.Delay(200);
             }
 
-            using (var automation = new FlaUI.UIA3.UIA3Automation())
+            try
             {
-                var steamLoginWin = automation.GetDesktop().FindFirstDescendant(cf => cf.ByName("登录 Steam"));
-                if (steamLoginWin != null)
+                using (var automation = new FlaUI.UIA3.UIA3Automation())
                 {
-                    var allElems = steamLoginWin.FindAllDescendants();
-                    var allEdits = allElems.Where(e => e.ControlType == FlaUI.Core.Definitions.ControlType.Edit).ToList();
-                    if (allEdits.Count >= 2)
+                    var steamLoginWin = automation.GetDesktop().FindFirstDescendant(cf => cf.ByName("登录 Steam"));
+                    if (steamLoginWin != null)
                     {
-                        allEdits[0].Focus();
-                        await Task.Delay(200);
-                        Clipboard.SetText(acc.Username);
-                        SendKeys.SendWait("^a");
-                        await Task.Delay(80);
-                        SendKeys.SendWait("^v");
-                        await Task.Delay(200);
+                        var allElems = steamLoginWin.FindAllDescendants();
+                        var allEdits = allElems.Where(e => e.ControlType == FlaUI.Core.Definitions.ControlType.Edit).ToList();
+                        if (allEdits.Count >= 2)
+                        {
+                            allEdits[0].Focus();
+                            await Task.Delay(200);
+                            Clipboard.SetText(acc.Username);
+                            SendKeys.SendWait("^a");
+                            await Task.Delay(80);
+                            SendKeys.SendWait("^v");
+                            await Task.Delay(200);
 
-                        allEdits[1].Focus();
-                        await Task.Delay(200);
-                        Clipboard.SetText(acc.Password);
-                        SendKeys.SendWait("^a");
-                        await Task.Delay(80);
-                        SendKeys.SendWait("^v");
-                        await Task.Delay(200);
+                            allEdits[1].Focus();
+                            await Task.Delay(200);
+                            Clipboard.SetText(acc.Password);
+                            SendKeys.SendWait("^a");
+                            await Task.Delay(80);
+                            SendKeys.SendWait("^v");
+                            await Task.Delay(200);
 
-                        SendKeys.SendWait("{ENTER}");
-                        await Task.Delay(500);
-                    }
-                    else
-                    {
-                        SetForegroundWindow(hwndLogin);
-                        Clipboard.SetText(acc.Username);
-                        SendKeys.SendWait("^a");
-                        SendKeys.SendWait("^v");
-                        await Task.Delay(150);
+                            SendKeys.SendWait("{ENTER}");
+                            await Task.Delay(500);
+                        }
+                        else
+                        {
+                            SetForegroundWindow(hwndLogin);
+                            Clipboard.SetText(acc.Username);
+                            SendKeys.SendWait("^a");
+                            SendKeys.SendWait("^v");
+                            await Task.Delay(150);
 
-                        SendKeys.SendWait("{TAB}");
-                        await Task.Delay(150);
+                            SendKeys.SendWait("{TAB}");
+                            await Task.Delay(150);
 
-                        Clipboard.SetText(acc.Password);
-                        SendKeys.SendWait("^a");
-                        SendKeys.SendWait("^v");
-                        await Task.Delay(150);
+                            Clipboard.SetText(acc.Password);
+                            SendKeys.SendWait("^a");
+                            SendKeys.SendWait("^v");
+                            await Task.Delay(150);
 
-                        SendKeys.SendWait("{ENTER}");
+                            SendKeys.SendWait("{ENTER}");
+                        }
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"自动输入账号密码流程异常：{ex.Message}，即将关闭steam.exe");
+                KillProcessIfExist("steam");
+                return;
+            }
 
-            // 4. 自动输入Steam Guard验证码
+            // 自动输入Steam Guard验证码
             string maFilePath = SteamGuardHelper.FindMaFileForAccount(_config.maFilesDir, acc.Username);
             if (maFilePath == null)
             {
                 MessageBox.Show("未找到此账号的maFile，无法自动获取验证码！");
+                KillProcessIfExist("steam");
                 return;
             }
             using (var automation = new FlaUI.UIA3.UIA3Automation())
             {
                 bool codeEntered = false;
-                for (int i = 0; i < 40; i++)
+                for (int i = 0; i < 100; i++)
                 {
                     var win = automation.GetDesktop().FindFirstDescendant(cf => cf.ByName("登录 Steam"));
                     if (win != null)
@@ -387,7 +483,10 @@ namespace SteamAutoLogin
                     await Task.Delay(500);
                 }
                 if (!codeEntered)
-                    MessageBox.Show("未能检测到验证码界面或未自动填入验证码，请手动操作！");
+                {
+                    MessageBox.Show("未能检测到验证码界面或未自动填入验证码!");
+                    KillProcessIfExist("steam");
+                }
             }
         }
 
@@ -421,40 +520,66 @@ namespace SteamAutoLogin
             });
         }
 
+        // 失败返回 -1；只在成功时返回等级
         private async Task<int> QueryLevelDirectly(AccountInfo acc)
         {
             string maFilePath = SteamGuardHelper.FindMaFileForAccount(_config.maFilesDir, acc.Username);
-            if (maFilePath == null) return 0;
-            var psi = new ProcessStartInfo("node", $"{_config.nodeScriptPath} {acc.Username} {acc.Password} \"{maFilePath}\"")
-            {
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            string allOut = null;
-            try { allOut = await RunNodeScript(psi); }
-            catch { return 0; }
+            if (maFilePath == null) return -1;
+
+            var psi = BuildNodeStartInfo(acc.Username, acc.Password, maFilePath);
+
             try
             {
-                var info = JsonConvert.DeserializeObject<LevelInfo>(allOut);
-                return info?.currentLevel ?? 0;
+                (string stdout, string stderr) = await RunNodeScript(psi, acc.Username);
+                if (stdout == null) return -1;
+
+                string json = ExtractLastJson(stdout);
+                var info = JsonConvert.DeserializeObject<LevelInfo>(json);
+
+                if (!string.IsNullOrEmpty(info?.error))
+                    return -1;
+
+                return info?.currentLevel ?? -1;
             }
-            catch { return 0; }
+            catch
+            {
+                return -1;
+            }
         }
 
-        private async Task<string> RunNodeScript(ProcessStartInfo psi)
+        // —— 修正后的 RunNodeScript：对同一个 timeoutTask 比较，杜绝误判 —— 
+        private async Task<(string stdout, string stderr)> RunNodeScript(ProcessStartInfo psi, string accountForLog)
         {
             using (var process = Process.Start(psi))
-            using (var reader = process.StandardOutput)
             {
-                var readTask = reader.ReadToEndAsync();
-                if (await Task.WhenAny(readTask, Task.Delay(60 * 1000)) == readTask)
-                    return readTask.Result;
-                else
+                var readStdout = process.StandardOutput.ReadToEndAsync();
+                var readStderr = process.StandardError.ReadToEndAsync();
+
+                var timeoutTask = Task.Delay(130 * 1000);   // 与 Node 120s 硬超时配合
+                var allTask = Task.WhenAll(readStdout, readStderr);
+
+                var finished = await Task.WhenAny(allTask, timeoutTask);
+                if (finished == timeoutTask)
                 {
-                    try { process.Kill(); } catch { }
-                    return null;
+                    try { if (!process.HasExited) process.Kill(); } catch { }
+                    return (null, null);
                 }
+
+                string stdout = readStdout.Result;
+                string stderr = readStderr.Result;
+
+                // 落盘日志（便于排查）
+                try
+                {
+                    var logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+                    Directory.CreateDirectory(logDir);
+                    File.WriteAllText(Path.Combine(logDir, $"node_stdout_{accountForLog}_{DateTime.Now:yyyyMMdd_HHmmss}.log"), stdout ?? "");
+                    if (!string.IsNullOrWhiteSpace(stderr))
+                        File.WriteAllText(Path.Combine(logDir, $"node_stderr_{accountForLog}_{DateTime.Now:yyyyMMdd_HHmmss}.log"), stderr);
+                }
+                catch { /* 忽略日志写入异常 */ }
+
+                return (stdout, stderr);
             }
         }
 
@@ -498,6 +623,17 @@ namespace SteamAutoLogin
                 }
                 workbook.Save();
             }
+        }
+
+        // 提取最后一段 { ... }，防止非 JSON 噪音
+        private string ExtractLastJson(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return "{}";
+            int l = text.LastIndexOf('{');
+            int r = text.LastIndexOf('}');
+            if (l >= 0 && r > l)
+                return text.Substring(l, r - l + 1);
+            return text.Trim();
         }
 
         // Win32辅助
